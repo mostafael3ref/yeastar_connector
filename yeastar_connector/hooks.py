@@ -9,8 +9,17 @@ app_license = "Proprietary"
 
 after_install = "yeastar_connector.install.after_install"
 
+# (اختياري) ممكن تشيله؛ مش ضروري لو دالتك معمولها whitelist في api.py
 override_whitelisted_methods = {
     "yeastar_connector.api.webhook": "yeastar_connector.api.webhook"
+}
+
+scheduler_events = {
+    "cron": {
+        "*/5 * * * *": [
+            "yeastar_connector.sync.run"
+        ]
+    }
 }
 
 fixtures = []
