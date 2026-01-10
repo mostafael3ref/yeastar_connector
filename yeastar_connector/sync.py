@@ -1,11 +1,10 @@
-# yeastar_connector/yeastar_connector/sync.py
-
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import frappe
+from frappe.utils import now_datetime
 
 from yeastar_connector.yeastar_client import YeastarClient
 from yeastar_connector.utils import normalize_phone
@@ -15,16 +14,39 @@ def _now_ts() -> int:
     return int(time.time())
 
 
-def _get_time_window(settings) -> tuple[int, int]:
+def _get_flag(settings, *names: str) -> int:
+    """
+    Return 1 if any of the provided attribute names is truthy on settings.
+    Helps when fieldname differs across versions.
+    """
+    for n in names:
+        v = getattr(settings, n, None)
+        if v is None:
+            continue
+        try:
+            if int(v or 0):
+                return 1
+        except Exception:
+            if bool(v):
+                return 1
+    return 0
+
+
+def _get_time_window(settings) -> Tuple[int, int]:
     """
     start_ts based on last_sync_at_ts or sync_from_ts
+    with overlap to catch delayed recordings.
     """
-    # لو أول مرة: خليه من sync_from_ts أو آخر 24 ساعة كافتراضي
     start_ts = int(getattr(settings, "last_sync_at_ts", None) or 0)
+
     if not start_ts:
         start_ts = int(getattr(settings, "sync_from_ts", None) or 0)
+
     if not start_ts:
-        start_ts = _now_ts() - 24 * 3600
+        start_ts = _now_ts() - 24 * 3600  # default: last 24 hours
+
+    # overlap 10 minutes (recordings may arrive late)
+    start_ts = max(0, start_ts - 600)
 
     end_ts = _now_ts()
     return start_ts, end_ts
@@ -35,13 +57,15 @@ def run():
     Scheduled entrypoint (called by hooks cron)
     """
     settings = frappe.get_single("Yeastar Settings")
-    if not int(getattr(settings, "sync_enabled", 0) or 0):
+
+    # Support different fieldnames for the checkbox
+    if not _get_flag(settings, "enable_sync_jobs", "sync_enabled", "enable_sync", "sync_jobs_enabled"):
         return
 
     client = YeastarClient(settings)
 
     # 1) Extensions (optional)
-    if int(getattr(settings, "sync_extensions", 0) or 0):
+    if _get_flag(settings, "sync_extensions", "enable_sync_extensions"):
         sync_extensions(client)
 
     # 2) Call Logs (important)
@@ -101,6 +125,9 @@ def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     Different Yeastar builds return different shapes.
     We'll try common keys.
     """
+    if not isinstance(payload, dict):
+        return []
+
     for key in ("data", "items", "list", "records", "result"):
         v = payload.get(key)
         if isinstance(v, list):
@@ -117,7 +144,9 @@ def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> b
     """
     Try to detect pagination.
     """
-    # if API returns total
+    if not isinstance(payload, dict):
+        return False
+
     total = None
     for k in ("total", "total_count", "count"):
         if isinstance(payload.get(k), int):
@@ -161,56 +190,83 @@ def upsert_agent_from_extension(ext: Dict[str, Any]):
 
 def upsert_call_log(row: Dict[str, Any], settings):
     """
-    Insert/update Yeastar Call Log based on a unique call id.
-    Adjust field names if your DocType differs.
+    Upsert Yeastar Call Log.
+    IMPORTANT: update existing doc (do NOT skip) so recordings/duration get filled.
+    Aligned with fields used in api.py: from_number/to_number/extension/duration/recording_url/status/direction/...
     """
-    # try to get a stable id
-    call_id = str(row.get("call_id") or row.get("uniqueid") or row.get("id") or "").strip()
+
+    # stable call id
+    call_id = str(row.get("call_id") or row.get("uniqueid") or row.get("id") or row.get("cdr_id") or row.get("cdrId") or "").strip()
     if not call_id:
-        # fallback: build pseudo id
         call_id = f"{row.get('start_time')}-{row.get('src')}-{row.get('dst')}"
 
-    exists = frappe.db.exists("Yeastar Call Log", {"call_id": call_id})
-    if exists:
+    direction = str(row.get("direction") or row.get("call_direction") or row.get("type") or "").strip().lower()
+    status = str(row.get("status") or row.get("state") or row.get("event") or row.get("call_state") or "").strip().lower()
+
+    src = str(row.get("src") or row.get("caller") or row.get("caller_number") or row.get("callerNumber") or row.get("from") or "").strip()
+    dst = str(row.get("dst") or row.get("callee") or row.get("callee_number") or row.get("calleeNumber") or row.get("to") or "").strip()
+
+    default_cc = str(getattr(settings, "phone_country_code", "+966") or "+966")
+    src_n = normalize_phone(src, default_cc=default_cc)
+    dst_n = normalize_phone(dst, default_cc=default_cc)
+
+    extension = str(row.get("extension") or row.get("ext") or row.get("agent_ext") or row.get("agent_extension") or "").strip()
+
+    # timestamps (may be TS or strings; store as-is if your DocType supports it)
+    start_time = row.get("start_time") or row.get("startTime") or row.get("start_ts") or row.get("startTs")
+    end_time = row.get("end_time") or row.get("endTime") or row.get("end_ts") or row.get("endTs")
+
+    duration = row.get("duration") or row.get("billsec") or row.get("talk_time") or row.get("talkTime") or 0
+    try:
+        duration = int(duration)
+    except Exception:
+        duration = 0
+
+    recording_url = str(row.get("recording_url") or row.get("record_url") or row.get("recording") or row.get("recordingUrl") or "").strip()
+
+    doc_data = {
+        "call_id": call_id,
+        "direction": direction or None,
+        "status": status or None,
+        "from_number": src_n or None,
+        "to_number": dst_n or None,
+        "extension": extension or None,
+        "duration": duration or None,
+        "recording_url": recording_url or None,
+        "raw_payload": frappe.as_json(row),
+        "last_event_at": now_datetime(),
+    }
+
+    if start_time:
+        doc_data["start_time"] = str(start_time)
+    if end_time:
+        doc_data["end_time"] = str(end_time)
+
+    existing_name = frappe.db.get_value("Yeastar Call Log", {"call_id": call_id}, "name")
+
+    if existing_name:
+        doc = frappe.get_doc("Yeastar Call Log", existing_name)
+
+        # Update only missing values, but always refresh status/raw_payload/last_event_at
+        for k, v in doc_data.items():
+            if k in ("raw_payload", "last_event_at", "status"):
+                doc.set(k, v)
+                continue
+
+            if v in (None, "", 0):
+                continue
+
+            if not doc.get(k) or doc.get(k) in ("", 0):
+                doc.set(k, v)
+
+        doc.save(ignore_permissions=True)
         return
 
-    direction = str(row.get("direction") or row.get("call_direction") or "").strip().lower()
-    src = str(row.get("src") or row.get("caller") or row.get("caller_number") or "").strip()
-    dst = str(row.get("dst") or row.get("callee") or row.get("callee_number") or "").strip()
-
-    # Normalize phones for matching CRM
-    src_n = normalize_phone(src, default_cc=str(getattr(settings, "phone_country_code", "+966") or "+966"))
-    dst_n = normalize_phone(dst, default_cc=str(getattr(settings, "phone_country_code", "+966") or "+966"))
-
-    start_ts = int(row.get("start_time") or row.get("start_ts") or row.get("timestamp") or 0)
-    end_ts = int(row.get("end_time") or row.get("end_ts") or 0)
-    duration = int(row.get("duration") or 0)
-
-    extension = str(row.get("extension") or row.get("ext") or row.get("agent_ext") or "").strip()
-
-    recording_id = str(row.get("recording_id") or row.get("record_id") or "").strip()
-    recording_url = str(row.get("recording_url") or row.get("record_url") or "").strip()
-
-    doc = frappe.get_doc({
-        "doctype": "Yeastar Call Log",
-        "call_id": call_id,
-        "direction": direction,
-        "src": src,
-        "dst": dst,
-        "src_normalized": src_n,
-        "dst_normalized": dst_n,
-        "start_time_ts": start_ts,
-        "end_time_ts": end_ts,
-        "duration": duration,
-        "extension": extension,
-        "recording_id": recording_id,
-        "recording_url": recording_url,
-        "raw_payload": frappe.as_json(row),
-    })
+    doc = frappe.get_doc({"doctype": "Yeastar Call Log", **doc_data})
     doc.insert(ignore_permissions=True)
 
-    # Auto link to Lead/Customer by phone (optional)
-    if int(getattr(settings, "auto_link_crm", 0) or 0):
+    # Optional: Auto link to Lead/Customer by phone (if you add this flag/fields)
+    if _get_flag(settings, "auto_link_crm"):
         try_link_crm(doc, settings)
 
 
@@ -221,17 +277,16 @@ def try_link_crm(call_log_doc, settings):
     - Find Customer by phone
     Adjust per your CRM fields.
     """
-    # choose which number is "external" based on direction
-    number = call_log_doc.src_normalized or call_log_doc.dst_normalized
+    number = call_log_doc.from_number or call_log_doc.to_number
     if not number:
         return
 
     # Lead match (example fields)
     lead = frappe.db.get_value("Lead", {"phone": ["like", f"%{number[-8:]}%"]}, "name")
-    if lead:
+    if lead and hasattr(call_log_doc, "lead"):
         call_log_doc.db_set("lead", lead, update_modified=False)
         return
 
     customer = frappe.db.get_value("Customer", {"mobile_no": ["like", f"%{number[-8:]}%"]}, "name")
-    if customer:
+    if customer and hasattr(call_log_doc, "customer"):
         call_log_doc.db_set("customer", customer, update_modified=False)
