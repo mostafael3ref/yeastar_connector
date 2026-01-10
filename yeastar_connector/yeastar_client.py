@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-import urllib.parse
 from typing import Any, Dict, Optional
 
 import frappe
@@ -18,37 +17,80 @@ def _now_ts() -> int:
     return int(time.time())
 
 
-def _as_bool(v) -> bool:
-    return bool(v) and str(v).lower() not in ("0", "false", "no", "none", "")
-
-
 def get_settings():
-    # Single doctype
     return frappe.get_single("Yeastar Settings")
+
+
+def _fieldtype(doctype: str, fieldname: str) -> Optional[str]:
+    try:
+        df = frappe.get_meta(doctype).get_field(fieldname)
+        return df.fieldtype if df else None
+    except Exception:
+        return None
+
+
+def _get_secret(settings, fieldname: str) -> str:
+    """
+    Safe get for Password fields (won't throw PasswordNotFoundError).
+    Falls back to plain field if it isn't Password.
+    """
+    ftype = _fieldtype(settings.doctype, fieldname)
+
+    # If it's Password, use get_password safely
+    if ftype == "Password":
+        try:
+            return (settings.get_password(fieldname, raise_exception=False) or "").strip()
+        except Exception:
+            return ""
+
+    # Otherwise, treat as normal field (Data/Text)
+    try:
+        return (getattr(settings, fieldname, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _set_secret(settings, fieldname: str, value: str):
+    """
+    Store secret in settings:
+    - If field is Password => set_password
+    - else => db_set (plain)
+    """
+    value = (value or "").strip()
+    ftype = _fieldtype(settings.doctype, fieldname)
+
+    if ftype == "Password":
+        # For Single DocType, set_password + save is the correct way
+        settings.set_password(fieldname, value)
+        settings.save(ignore_permissions=True)
+        return
+
+    # Plain field
+    settings.db_set(fieldname, value, update_modified=False)
 
 
 class YeastarClient:
     """
     OAuth client for Yeastar API + helper GET/POST.
-    Token is stored in Yeastar Settings.
 
-    You MUST fill these fields in Yeastar Settings:
-      - pbx_base_url              e.g. https://abrajataj.ras.yeastar.com
+    Required in Yeastar Settings:
+      - pbx_base_url        e.g. https://abrajataj.ras.yeastar.com
       - client_id
-      - client_secret
-      - token_url (optional)      default: <pbx_base_url>/openapi/v1.0/oauth2/token
-      - api_base_path (optional)  default: /openapi/v1.0
+      - client_secret       (Password field recommended)
+      - api_base_path       default /openapi/v1.0
+      - token_url           optional; default <base_url><api_base_path>/oauth2/token
     """
 
     def __init__(self, settings=None):
         self.settings = settings or get_settings()
 
-        self.base_url = (self.settings.pbx_base_url or "").strip().rstrip("/")
+        self.base_url = (getattr(self.settings, "pbx_base_url", "") or "").strip().rstrip("/")
         if not self.base_url:
-            frappe.throw("Yeastar Settings: pbx_base_url is required")
+            frappe.throw("Yeastar Settings: PBX Base URL (pbx_base_url) is required")
 
-        self.client_id = (self.settings.client_id or "").strip()
-        self.client_secret = (self.settings.get_password("client_secret") or "").strip()
+        self.client_id = (getattr(self.settings, "client_id", "") or "").strip()
+        self.client_secret = _get_secret(self.settings, "client_secret")
+
         if not self.client_id or not self.client_secret:
             frappe.throw("Yeastar Settings: client_id and client_secret are required")
 
@@ -64,23 +106,31 @@ class YeastarClient:
     # Token / OAuth
     # ---------------------------
     def _token_valid(self) -> bool:
-        access_token = (self.settings.get_password("access_token") or "").strip()
+        access_token = _get_secret(self.settings, "access_token")
         exp = getattr(self.settings, "token_expires_at_ts", None)
+
         if not access_token or not exp:
             return False
+
+        try:
+            exp = int(exp)
+        except Exception:
+            return False
+
         # refresh قبلها بدقيقة
-        return _now_ts() < int(exp) - 60
+        return _now_ts() < exp - 60
 
     def ensure_token(self) -> str:
-        if self._token_valid():
-            return self.settings.get_password("access_token")
+        token = _get_secret(self.settings, "access_token")
+        if token and self._token_valid():
+            return token
 
+        # If missing/expired -> request new token
         return self.refresh_token()
 
     def refresh_token(self) -> str:
         """
-        Most Yeastar implementations support client_credentials.
-        If your Yeastar uses auth_code, we'll adjust later.
+        Yeastar generally supports client_credentials.
         """
         data = {
             "grant_type": "client_credentials",
@@ -103,7 +153,9 @@ class YeastarClient:
             )
             raise YeastarAPIError(f"OAuth failed: HTTP {resp.status_code}")
 
-        payload = resp.json() if resp.headers.get("content-type", "").lower().startswith("application/json") else {}
+        ctype = (resp.headers.get("content-type", "") or "").lower()
+        payload = resp.json() if ctype.startswith("application/json") else {}
+
         access_token = (payload.get("access_token") or "").strip()
         expires_in = int(payload.get("expires_in") or 3600)
 
@@ -111,14 +163,16 @@ class YeastarClient:
             frappe.log_error(title="Yeastar OAuth invalid payload", message=str(payload)[:2000])
             raise YeastarAPIError("OAuth returned no access_token")
 
-        # store token in settings
+        # store token + expiry
         exp_ts = _now_ts() + expires_in
-        self.settings.db_set("access_token", access_token, update_modified=False)
+
+        # store access_token safely (Password or plain)
+        _set_secret(self.settings, "access_token", access_token)
         self.settings.db_set("token_expires_at_ts", exp_ts, update_modified=False)
 
-        # Optional refresh token if exists
+        # Optional refresh token if exists (store safely too)
         if payload.get("refresh_token"):
-            self.settings.db_set("refresh_token", payload.get("refresh_token"), update_modified=False)
+            _set_secret(self.settings, "refresh_token", str(payload.get("refresh_token")))
 
         return access_token
 
@@ -149,7 +203,10 @@ class YeastarClient:
             raise YeastarAPIError(str(e))
 
         if resp.status_code >= 300:
-            frappe.log_error(title="Yeastar GET error", message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}")
+            frappe.log_error(
+                title="Yeastar GET error",
+                message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}",
+            )
             raise YeastarAPIError(f"GET failed: HTTP {resp.status_code}")
 
         return resp.json() if resp.text else {}
@@ -163,29 +220,26 @@ class YeastarClient:
             raise YeastarAPIError(str(e))
 
         if resp.status_code >= 300:
-            frappe.log_error(title="Yeastar POST error", message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}")
+            frappe.log_error(
+                title="Yeastar POST error",
+                message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}",
+            )
             raise YeastarAPIError(f"POST failed: HTTP {resp.status_code}")
 
         return resp.json() if resp.text else {}
 
     # ---------------------------
-    # API wrappers (adjust paths)
+    # API wrappers
     # ---------------------------
     def fetch_extensions(self, page: int = 1, page_size: int = 100) -> Dict[str, Any]:
-        """
-        Adjust endpoint if needed.
-        """
         endpoint = getattr(self.settings, "extensions_endpoint", None) or "/extension/list"
         params = {"page": page, "page_size": page_size}
         return self.get(endpoint, params=params)
 
     def fetch_call_logs(self, start_ts: int, end_ts: int, page: int = 1, page_size: int = 100) -> Dict[str, Any]:
-        """
-        Adjust endpoint if needed.
-        """
         endpoint = getattr(self.settings, "call_logs_endpoint", None) or "/cdr/list"
         params = {
-            "start_time": start_ts,  # sometimes needs YYYY-mm-dd HH:MM:SS instead
+            "start_time": start_ts,
             "end_time": end_ts,
             "page": page,
             "page_size": page_size,
@@ -193,9 +247,5 @@ class YeastarClient:
         return self.get(endpoint, params=params)
 
     def fetch_recording_download_url(self, recording_id: str) -> Dict[str, Any]:
-        """
-        Adjust if you have a recordings endpoint.
-        """
         endpoint_tpl = getattr(self.settings, "recording_endpoint_tpl", None) or "/recording/get"
-        # if template needs id as param
         return self.get(endpoint_tpl, params={"id": recording_id})
