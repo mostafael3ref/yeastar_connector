@@ -15,6 +15,31 @@ from yeastar_connector.utils import (
 
 
 # ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+def _log(title: str, message: str, settings=None):
+    """
+    Log to Error Log only when debug enabled (if field exists).
+    If debug field not present, log anyway in critical spots.
+    """
+    try:
+        if settings and int(getattr(settings, "debug_webhook", 0) or 0):
+            frappe.log_error(title=title, message=message[:4000])
+    except Exception:
+        # fallback safe
+        pass
+
+
+def _stable_fallback_id(data: dict) -> str:
+    """
+    Stable fallback id (prevents duplicates when call_id is missing).
+    """
+    base = f"{data.get('from_no')}|{data.get('to_no')}|{data.get('extension')}|{data.get('status')}|{data.get('start_time')}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:20]
+
+
+# ----------------------------------------------------------------------
 # Security
 # ----------------------------------------------------------------------
 
@@ -42,6 +67,13 @@ def _require_secret(settings, payload: dict):
     )
 
     if incoming != expected:
+        # log mismatch (do not log secrets)
+        frappe.log_error(
+            title="Yeastar Webhook Secret mismatch",
+            message=f"Incoming secret is missing or invalid. Headers present: "
+                    f"{'X-Yeastar-Secret' if frappe.get_request_header('X-Yeastar-Secret') else ''} "
+                    f"{'X-Webhook-Secret' if frappe.get_request_header('X-Webhook-Secret') else ''}".strip()
+        )
         frappe.throw(_("Invalid webhook secret."), frappe.PermissionError)
 
 
@@ -107,8 +139,19 @@ def _extract_event(payload: dict) -> dict:
         or ""
     )
 
-    start_time = payload.get("start_time") or payload.get("startTime") or payload.get("start_ts") or payload.get("startTs")
-    end_time = payload.get("end_time") or payload.get("endTime") or payload.get("end_ts") or payload.get("endTs")
+    start_time = (
+        payload.get("start_time")
+        or payload.get("startTime")
+        or payload.get("start_ts")
+        or payload.get("startTs")
+    )
+
+    end_time = (
+        payload.get("end_time")
+        or payload.get("endTime")
+        or payload.get("end_ts")
+        or payload.get("endTs")
+    )
 
     duration = (
         payload.get("duration")
@@ -139,14 +182,6 @@ def _extract_event(payload: dict) -> dict:
     }
 
 
-def _fingerprint_id(data: dict) -> str:
-    """
-    Stable fallback id (prevents duplicates when call_id is missing).
-    """
-    base = f"{data.get('from_no')}|{data.get('to_no')}|{data.get('extension')}|{data.get('status')}|{data.get('start_time')}"
-    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:20]
-
-
 # ----------------------------------------------------------------------
 # Call Log upsert
 # ----------------------------------------------------------------------
@@ -154,21 +189,28 @@ def _fingerprint_id(data: dict) -> str:
 def _upsert_call_log(data: dict, raw_payload: dict, settings):
     # Stable fallback unique id
     if not data.get("call_id"):
-        data["call_id"] = _fingerprint_id(data)
+        data["call_id"] = _stable_fallback_id(data)
 
     default_cc = settings.phone_country_code or "+966"
 
     from_norm = normalize_phone(data.get("from_no"), default_cc)
     to_norm = normalize_phone(data.get("to_no"), default_cc)
 
-    # Optional: Ignore internal calls (both look like extensions)
+    # Ignore internal calls (ONLY if enabled)
     if int(getattr(settings, "ignore_internal_calls", 0) or 0):
-        # naive internal detection: both short numeric and <= 6 digits
+
         def _looks_ext(x: str) -> bool:
             x = (x or "").replace("+", "").strip()
             return x.isdigit() and 2 <= len(x) <= 6
+
         if _looks_ext(from_norm) and _looks_ext(to_norm):
-            return None  # ignore
+            # 🔥 This is why you may see "no logs" while testing extension-to-extension
+            _log(
+                "Yeastar Webhook skipped (internal call)",
+                f"Skipped internal call: from={from_norm}, to={to_norm}, ext={data.get('extension')}, status={data.get('status')}",
+                settings=settings,
+            )
+            return None
 
     # Determine customer side
     if data.get("direction") in ("inbound", "incoming", "in"):
@@ -213,7 +255,7 @@ def _upsert_call_log(data: dict, raw_payload: dict, settings):
     if existing:
         doc = frappe.get_doc("Yeastar Call Log", existing)
 
-        # Update only if incoming has value (and doc empty) OR overwrite always for last_event_at/raw_payload/status
+        # Update only if incoming has value (and doc empty) OR overwrite always for status/raw_payload/last_event_at
         for k, v in doc_data.items():
             if k in ("last_event_at", "raw_payload", "status"):
                 doc.set(k, v)
@@ -258,19 +300,15 @@ def webhook():
     try:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
-            # sometimes payload can be list/str; normalize to dict
             payload = {"payload": payload}
     except Exception:
         payload = {"raw": raw}
 
-    _require_secret(settings, payload)
+    # Optional debug hit log
+    _log("Yeastar Webhook HIT", raw[:2000], settings=settings)
 
-    # Debug logging (optional - prevents flooding)
-    if int(getattr(settings, "debug_webhook", 0) or 0):
-        frappe.log_error(
-            title="Yeastar Webhook HIT",
-            message=raw[:2000],
-        )
+    # Validate secret
+    _require_secret(settings, payload)
 
     data = _extract_event(payload)
     call_log_name = _upsert_call_log(data, payload, settings)
