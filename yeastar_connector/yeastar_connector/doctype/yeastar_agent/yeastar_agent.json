@@ -1,0 +1,18 @@
+{
+  "doctype": "DocType",
+  "name": "Yeastar Agent",
+  "module": "Yeastar Connector",
+  "custom": 0,
+  "istable": 0,
+  "issingle": 0,
+  "track_changes": 1,
+  "fields": [
+    {"fieldname":"extension","fieldtype":"Data","label":"Extension","reqd":1, "unique":1},
+    {"fieldname":"user","fieldtype":"Link","label":"User","options":"User","reqd":1}
+  ],
+  "permissions": [
+    {"role":"System Manager","read":1,"write":1,"create":1,"delete":1}
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC"
+}

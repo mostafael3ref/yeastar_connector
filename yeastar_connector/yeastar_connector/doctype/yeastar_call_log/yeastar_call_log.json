@@ -1,0 +1,32 @@
+{
+  "doctype": "DocType",
+  "name": "Yeastar Call Log",
+  "module": "Yeastar Connector",
+  "custom": 0,
+  "istable": 0,
+  "issingle": 0,
+  "track_changes": 1,
+  "fields": [
+    {"fieldname":"call_id","fieldtype":"Data","label":"Call ID","reqd":1,"unique":1},
+    {"fieldname":"direction","fieldtype":"Select","label":"Direction","options":"\nInbound\nOutbound\nInternal","default":"Inbound"},
+    {"fieldname":"status","fieldtype":"Data","label":"Status"},
+    {"fieldname":"from_number","fieldtype":"Data","label":"From"},
+    {"fieldname":"to_number","fieldtype":"Data","label":"To"},
+    {"fieldname":"extension","fieldtype":"Data","label":"Extension"},
+    {"fieldname":"agent_user","fieldtype":"Link","label":"Agent User","options":"User"},
+    {"fieldname":"linked_doctype","fieldtype":"Data","label":"Linked DocType"},
+    {"fieldname":"linked_name","fieldtype":"Dynamic Link","label":"Linked Document","options":"linked_doctype"},
+    {"fieldname":"start_time","fieldtype":"Data","label":"Start Time"},
+    {"fieldname":"end_time","fieldtype":"Data","label":"End Time"},
+    {"fieldname":"duration","fieldtype":"Int","label":"Duration (sec)"},
+    {"fieldname":"recording_url","fieldtype":"Data","label":"Recording URL"},
+    {"fieldname":"last_event_at","fieldtype":"Datetime","label":"Last Event At"},
+    {"fieldname":"raw_payload","fieldtype":"Long Text","label":"Raw Payload"}
+  ],
+  "permissions": [
+    {"role":"System Manager","read":1,"write":1,"create":1,"delete":1},
+    {"role":"Sales User","read":1}
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC"
+}

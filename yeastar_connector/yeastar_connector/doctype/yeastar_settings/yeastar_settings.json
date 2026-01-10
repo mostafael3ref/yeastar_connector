@@ -1,0 +1,23 @@
+{
+  "doctype": "DocType",
+  "name": "Yeastar Settings",
+  "module": "Yeastar Connector",
+  "custom": 0,
+  "istable": 0,
+  "issingle": 1,
+  "editable_grid": 0,
+  "quick_entry": 0,
+  "track_changes": 1,
+  "fields": [
+    {"fieldname":"enabled","fieldtype":"Check","label":"Enabled","default":"0"},
+    {"fieldname":"webhook_secret","fieldtype":"Password","label":"Webhook Secret","reqd":1},
+    {"fieldname":"phone_country_code","fieldtype":"Data","label":"Phone Country Code","default":"+966"},
+    {"fieldname":"create_lead_if_not_found","fieldtype":"Check","label":"Create Lead If Not Found","default":"1"},
+    {"fieldname":"ignore_internal_calls","fieldtype":"Check","label":"Ignore Internal Calls","default":"1"}
+  ],
+  "permissions": [
+    {"role":"System Manager","read":1,"write":1,"create":1,"delete":1}
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC"
+}

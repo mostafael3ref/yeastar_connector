@@ -1,0 +1,3 @@
+recursive-include yeastar_connector *.py *.json *.md
+include LICENSE
+include README.md
