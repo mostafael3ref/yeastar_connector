@@ -12,61 +12,143 @@ from yeastar_connector.utils import (
     safe_json,
 )
 
-def _require_secret(settings):
-    # Yeastar will send header: X-Yeastar-Secret
-    incoming = (frappe.get_request_header("X-Yeastar-Secret") or "").strip()
-    if not settings.webhook_secret:
-        frappe.throw(_("Webhook Secret is not set in Yeastar Settings."), frappe.PermissionError)
-    if incoming != settings.webhook_secret.strip():
+
+# ----------------------------------------------------------------------
+# Security
+# ----------------------------------------------------------------------
+
+def _require_secret(settings, payload: dict):
+    """
+    Validate Yeastar Webhook Secret.
+
+    Yeastar may send the secret via:
+    - Header: X-Yeastar-Secret
+    - Header: X-Webhook-Secret
+    - Body: secret / webhook_secret
+    """
+
+    expected = (settings.get_password("webhook_secret") or "").strip()
+    if not expected:
+        frappe.throw(
+            _("Webhook Secret is not set in Yeastar Settings."),
+            frappe.PermissionError,
+        )
+
+    incoming = (
+        (frappe.get_request_header("X-Yeastar-Secret") or "").strip()
+        or (frappe.get_request_header("X-Webhook-Secret") or "").strip()
+        or str(payload.get("secret") or payload.get("webhook_secret") or "").strip()
+    )
+
+    if incoming != expected:
         frappe.throw(_("Invalid webhook secret."), frappe.PermissionError)
+
+
+# ----------------------------------------------------------------------
+# Payload extraction (generic – adjusted later per real samples)
+# ----------------------------------------------------------------------
 
 def _extract_event(payload: dict) -> dict:
     """
-    We keep this generic because Yeastar payload differs by firmware/settings.
-    You will later adjust mapping once you send me a real webhook sample.
+    Extract common call data from Yeastar webhook payload.
+    Payload structure may vary by firmware/version.
     """
-    # Common guesses:
-    call_id = payload.get("call_id") or payload.get("callId") or payload.get("unique_id") or payload.get("id")
-    direction = payload.get("direction") or payload.get("call_direction") or payload.get("type")
-    status = payload.get("status") or payload.get("event") or payload.get("state")
 
-    from_no = payload.get("from") or payload.get("caller") or payload.get("caller_number") or payload.get("callerNumber")
-    to_no = payload.get("to") or payload.get("callee") or payload.get("callee_number") or payload.get("calleeNumber")
+    call_id = (
+        payload.get("call_id")
+        or payload.get("callId")
+        or payload.get("unique_id")
+        or payload.get("uniqueid")
+        or payload.get("id")
+    )
 
-    extension = payload.get("extension") or payload.get("ext") or payload.get("agent_extension") or payload.get("extension_number")
+    direction = (
+        payload.get("direction")
+        or payload.get("call_direction")
+        or payload.get("type")
+        or ""
+    )
+
+    status = (
+        payload.get("status")
+        or payload.get("event")
+        or payload.get("state")
+        or ""
+    )
+
+    from_no = (
+        payload.get("from")
+        or payload.get("caller")
+        or payload.get("caller_number")
+        or payload.get("callerNumber")
+        or ""
+    )
+
+    to_no = (
+        payload.get("to")
+        or payload.get("callee")
+        or payload.get("callee_number")
+        or payload.get("calleeNumber")
+        or ""
+    )
+
+    extension = (
+        payload.get("extension")
+        or payload.get("ext")
+        or payload.get("agent_extension")
+        or payload.get("extension_number")
+        or ""
+    )
 
     start_time = payload.get("start_time") or payload.get("startTime")
     end_time = payload.get("end_time") or payload.get("endTime")
-    duration = payload.get("duration") or payload.get("billsec") or payload.get("talk_time")
 
-    recording_url = payload.get("recording_url") or payload.get("recordingUrl") or payload.get("recording")
+    duration = (
+        payload.get("duration")
+        or payload.get("billsec")
+        or payload.get("talk_time")
+    )
+
+    recording_url = (
+        payload.get("recording_url")
+        or payload.get("recordingUrl")
+        or payload.get("recording")
+        or ""
+    )
 
     return {
         "call_id": str(call_id) if call_id else None,
-        "direction": (direction or "").lower()[:20],
-        "status": (status or "").lower()[:30],
-        "from_no": str(from_no) if from_no else "",
-        "to_no": str(to_no) if to_no else "",
-        "extension": str(extension) if extension else "",
+        "direction": str(direction).lower()[:20],
+        "status": str(status).lower()[:30],
+        "from_no": str(from_no),
+        "to_no": str(to_no),
+        "extension": str(extension),
         "start_time": start_time,
         "end_time": end_time,
         "duration": int(duration) if str(duration).isdigit() else None,
-        "recording_url": recording_url or "",
+        "recording_url": recording_url,
     }
 
+
+# ----------------------------------------------------------------------
+# Call Log upsert
+# ----------------------------------------------------------------------
+
 def _upsert_call_log(data: dict, raw_payload: dict, settings):
+    # Fallback unique id
     if not data.get("call_id"):
-        # still allow insert but unique key is missing; we fallback to hash
         data["call_id"] = frappe.generate_hash(length=12)
 
-    # normalize phone numbers
     default_cc = settings.phone_country_code or "+966"
+
     from_norm = normalize_phone(data.get("from_no"), default_cc)
     to_norm = normalize_phone(data.get("to_no"), default_cc)
 
-    # choose “party phone” based on direction
-    # inbound: caller is customer, outbound: callee is customer
-    party_phone = from_norm if (data.get("direction") in ["inbound", "incoming", "in"]) else to_norm
+    # Determine customer side
+    if data.get("direction") in ("inbound", "incoming", "in"):
+        party_phone = from_norm
+    else:
+        party_phone = to_norm
 
     linked_doctype, linked_name = find_party_by_phone(party_phone)
 
@@ -76,9 +158,11 @@ def _upsert_call_log(data: dict, raw_payload: dict, settings):
 
     agent_user = get_agent_user_by_extension(data.get("extension"))
 
-    existing = frappe.db.get_value("Yeastar Call Log", {"call_id": data["call_id"]}, "name")
+    existing = frappe.db.get_value(
+        "Yeastar Call Log", {"call_id": data["call_id"]}, "name"
+    )
 
-    doc_dict = {
+    doc_data = {
         "doctype": "Yeastar Call Log",
         "call_id": data["call_id"],
         "direction": data.get("direction"),
@@ -95,45 +179,62 @@ def _upsert_call_log(data: dict, raw_payload: dict, settings):
         "last_event_at": now_datetime(),
     }
 
-    # Handle start/end if present (store as text/datetime string - you can refine later)
     if data.get("start_time"):
-        doc_dict["start_time"] = str(data["start_time"])
+        doc_data["start_time"] = str(data["start_time"])
     if data.get("end_time"):
-        doc_dict["end_time"] = str(data["end_time"])
+        doc_data["end_time"] = str(data["end_time"])
 
     if existing:
         doc = frappe.get_doc("Yeastar Call Log", existing)
-        doc.update(doc_dict)
+        doc.update(doc_data)
         doc.save(ignore_permissions=True)
         return doc.name
 
-    doc = frappe.get_doc(doc_dict)
+    doc = frappe.get_doc(doc_data)
     doc.insert(ignore_permissions=True)
     return doc.name
+
+
+# ----------------------------------------------------------------------
+# Webhook endpoint
+# ----------------------------------------------------------------------
 
 @frappe.whitelist(allow_guest=True)
 def webhook():
     """
-    Yeastar Webhook receiver.
-    Configure Yeastar to POST JSON to:
-      https://<erp>/api/method/yeastar_connector.api.webhook
-    Send header:
+    Yeastar Webhook Receiver
+
+    URL:
+      https://<site>/api/method/yeastar_connector.api.webhook
+
+    Headers (one of them):
       X-Yeastar-Secret: <secret>
+      X-Webhook-Secret: <secret>
     """
+
     settings = get_settings()
     if not settings.enabled:
-        return {"ok": False, "message": "disabled"}
+        return {"ok": False, "message": "Yeastar Connector disabled"}
 
-    _require_secret(settings)
-
-    # Read raw body
     raw = frappe.request.get_data(as_text=True) or "{}"
+
+    # Debug: confirm webhook hit
+    frappe.log_error(
+        title="Yeastar Webhook HIT",
+        message=raw[:2000],
+    )
+
     try:
         payload = json.loads(raw)
     except Exception:
         payload = {"raw": raw}
 
-    data = _extract_event(payload)
-    name = _upsert_call_log(data, payload, settings)
+    _require_secret(settings, payload)
 
-    return {"ok": True, "call_log": name}
+    data = _extract_event(payload)
+    call_log_name = _upsert_call_log(data, payload, settings)
+
+    return {
+        "ok": True,
+        "call_log": call_log_name,
+    }
