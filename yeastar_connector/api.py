@@ -1,4 +1,5 @@
 import json
+import hashlib
 import frappe
 from frappe import _
 from frappe.utils import now_datetime
@@ -45,7 +46,7 @@ def _require_secret(settings, payload: dict):
 
 
 # ----------------------------------------------------------------------
-# Payload extraction (generic – adjusted later per real samples)
+# Payload extraction (generic)
 # ----------------------------------------------------------------------
 
 def _extract_event(payload: dict) -> dict:
@@ -60,6 +61,8 @@ def _extract_event(payload: dict) -> dict:
         or payload.get("unique_id")
         or payload.get("uniqueid")
         or payload.get("id")
+        or payload.get("cdr_id")
+        or payload.get("cdrId")
     )
 
     direction = (
@@ -73,6 +76,7 @@ def _extract_event(payload: dict) -> dict:
         payload.get("status")
         or payload.get("event")
         or payload.get("state")
+        or payload.get("call_state")
         or ""
     )
 
@@ -81,6 +85,7 @@ def _extract_event(payload: dict) -> dict:
         or payload.get("caller")
         or payload.get("caller_number")
         or payload.get("callerNumber")
+        or payload.get("src")
         or ""
     )
 
@@ -89,6 +94,7 @@ def _extract_event(payload: dict) -> dict:
         or payload.get("callee")
         or payload.get("callee_number")
         or payload.get("calleeNumber")
+        or payload.get("dst")
         or ""
     )
 
@@ -97,22 +103,25 @@ def _extract_event(payload: dict) -> dict:
         or payload.get("ext")
         or payload.get("agent_extension")
         or payload.get("extension_number")
+        or payload.get("agent_ext")
         or ""
     )
 
-    start_time = payload.get("start_time") or payload.get("startTime")
-    end_time = payload.get("end_time") or payload.get("endTime")
+    start_time = payload.get("start_time") or payload.get("startTime") or payload.get("start_ts") or payload.get("startTs")
+    end_time = payload.get("end_time") or payload.get("endTime") or payload.get("end_ts") or payload.get("endTs")
 
     duration = (
         payload.get("duration")
         or payload.get("billsec")
         or payload.get("talk_time")
+        or payload.get("talkTime")
     )
 
     recording_url = (
         payload.get("recording_url")
         or payload.get("recordingUrl")
         or payload.get("recording")
+        or payload.get("record_url")
         or ""
     )
 
@@ -130,19 +139,36 @@ def _extract_event(payload: dict) -> dict:
     }
 
 
+def _fingerprint_id(data: dict) -> str:
+    """
+    Stable fallback id (prevents duplicates when call_id is missing).
+    """
+    base = f"{data.get('from_no')}|{data.get('to_no')}|{data.get('extension')}|{data.get('status')}|{data.get('start_time')}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:20]
+
+
 # ----------------------------------------------------------------------
 # Call Log upsert
 # ----------------------------------------------------------------------
 
 def _upsert_call_log(data: dict, raw_payload: dict, settings):
-    # Fallback unique id
+    # Stable fallback unique id
     if not data.get("call_id"):
-        data["call_id"] = frappe.generate_hash(length=12)
+        data["call_id"] = _fingerprint_id(data)
 
     default_cc = settings.phone_country_code or "+966"
 
     from_norm = normalize_phone(data.get("from_no"), default_cc)
     to_norm = normalize_phone(data.get("to_no"), default_cc)
+
+    # Optional: Ignore internal calls (both look like extensions)
+    if int(getattr(settings, "ignore_internal_calls", 0) or 0):
+        # naive internal detection: both short numeric and <= 6 digits
+        def _looks_ext(x: str) -> bool:
+            x = (x or "").replace("+", "").strip()
+            return x.isdigit() and 2 <= len(x) <= 6
+        if _looks_ext(from_norm) and _looks_ext(to_norm):
+            return None  # ignore
 
     # Determine customer side
     if data.get("direction") in ("inbound", "incoming", "in"):
@@ -152,7 +178,7 @@ def _upsert_call_log(data: dict, raw_payload: dict, settings):
 
     linked_doctype, linked_name = find_party_by_phone(party_phone)
 
-    if not linked_name and settings.create_lead_if_not_found:
+    if not linked_name and int(getattr(settings, "create_lead_if_not_found", 0) or 0):
         linked_doctype = "Lead"
         linked_name = create_lead_from_phone(party_phone)
 
@@ -186,7 +212,17 @@ def _upsert_call_log(data: dict, raw_payload: dict, settings):
 
     if existing:
         doc = frappe.get_doc("Yeastar Call Log", existing)
-        doc.update(doc_data)
+
+        # Update only if incoming has value (and doc empty) OR overwrite always for last_event_at/raw_payload/status
+        for k, v in doc_data.items():
+            if k in ("last_event_at", "raw_payload", "status"):
+                doc.set(k, v)
+                continue
+            if v in (None, "", 0):
+                continue
+            if not doc.get(k) or doc.get(k) in ("", 0):
+                doc.set(k, v)
+
         doc.save(ignore_permissions=True)
         return doc.name
 
@@ -213,23 +249,28 @@ def webhook():
     """
 
     settings = get_settings()
-    if not settings.enabled:
+    if not int(getattr(settings, "enabled", 0) or 0):
         return {"ok": False, "message": "Yeastar Connector disabled"}
 
     raw = frappe.request.get_data(as_text=True) or "{}"
 
-    # Debug: confirm webhook hit
-    frappe.log_error(
-        title="Yeastar Webhook HIT",
-        message=raw[:2000],
-    )
-
+    # Parse JSON
     try:
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            # sometimes payload can be list/str; normalize to dict
+            payload = {"payload": payload}
     except Exception:
         payload = {"raw": raw}
 
     _require_secret(settings, payload)
+
+    # Debug logging (optional - prevents flooding)
+    if int(getattr(settings, "debug_webhook", 0) or 0):
+        frappe.log_error(
+            title="Yeastar Webhook HIT",
+            message=raw[:2000],
+        )
 
     data = _extract_event(payload)
     call_log_name = _upsert_call_log(data, payload, settings)
