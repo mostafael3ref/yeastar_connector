@@ -5,6 +5,6 @@ def get_data():
         {
             "module_name": "yeastar_connector",
             "type": "module",
-            "label": _("Yeastar Connector"),
+            "label": _("yeastar_connector"),
         }
     ]
