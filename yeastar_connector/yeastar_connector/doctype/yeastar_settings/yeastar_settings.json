@@ -1,7 +1,7 @@
 {
   "doctype": "DocType",
   "name": "Yeastar Settings",
-  "module": "yeastar_connector",
+  "module": "Yeastar Connector",
   "custom": 0,
   "istable": 0,
   "issingle": 1,
@@ -64,25 +64,50 @@
       "fieldtype": "Data",
       "label": "API Base Path",
       "default": "/openapi/v1.0",
-      "description": "Example: /openapi/v1.0",
       "depends_on": "eval:doc.enabled==1"
     },
     {
-      "fieldname": "client_id",
+      "fieldname": "token_url",
       "fieldtype": "Data",
-      "label": "Client ID",
-      "depends_on": "eval:doc.enabled==1"
-    },
-    {
-      "fieldname": "client_secret",
-      "fieldtype": "Password",
-      "label": "Client Secret",
+      "label": "Token URL (optional)",
+      "description": "Leave empty to use: <PBX Base URL><API Base Path>/get_token",
       "depends_on": "eval:doc.enabled==1"
     },
 
     {
-      "fieldname": "column_api_misc",
+      "fieldname": "api_username",
+      "fieldtype": "Data",
+      "label": "API Username (Client ID)",
+      "depends_on": "eval:doc.enabled==1"
+    },
+    {
+      "fieldname": "api_password",
+      "fieldtype": "Password",
+      "label": "API Password (Client Secret)",
+      "depends_on": "eval:doc.enabled==1"
+    },
+
+    {
+      "fieldname": "column_api_token",
       "fieldtype": "Column Break"
+    },
+    {
+      "fieldname": "access_token",
+      "fieldtype": "Data",
+      "label": "Access Token (auto)",
+      "read_only": 1
+    },
+    {
+      "fieldname": "refresh_token",
+      "fieldtype": "Data",
+      "label": "Refresh Token (auto)",
+      "read_only": 1
+    },
+    {
+      "fieldname": "token_expires_at_ts",
+      "fieldtype": "Int",
+      "label": "Token Expires At (TS)",
+      "read_only": 1
     },
     {
       "fieldname": "request_timeout",
@@ -161,7 +186,7 @@
       "fieldname": "recording_endpoint_tpl",
       "fieldtype": "Data",
       "label": "Recording Endpoint",
-      "default": "/recording/get_random",
+      "default": "/recording/get",
       "depends_on": "eval:doc.sync_enabled==1"
     }
   ],
