@@ -15,10 +15,6 @@ def _now_ts() -> int:
 
 
 def _get_flag(settings, *names: str) -> int:
-    """
-    Return 1 if any of the provided attribute names is truthy on settings.
-    Helps when fieldname differs across versions.
-    """
     for n in names:
         v = getattr(settings, n, None)
         if v is None:
@@ -33,29 +29,20 @@ def _get_flag(settings, *names: str) -> int:
 
 
 def _get_time_window(settings) -> Tuple[int, int]:
-    """
-    start_ts based on last_sync_at_ts or sync_from_ts
-    with overlap to catch delayed records.
-    """
     start_ts = int(getattr(settings, "last_sync_at_ts", None) or 0)
 
     if not start_ts:
         start_ts = int(getattr(settings, "sync_from_ts", None) or 0)
 
     if not start_ts:
-        start_ts = _now_ts() - 24 * 3600  # default: last 24 hours
+        start_ts = _now_ts() - 24 * 3600
 
-    # overlap 10 minutes
     start_ts = max(0, start_ts - 600)
-
     end_ts = _now_ts()
     return start_ts, end_ts
 
 
 def run():
-    """
-    Scheduled entrypoint (called by hooks cron)
-    """
     settings = frappe.get_single("Yeastar Settings")
 
     if not _get_flag(settings, "enable_sync_jobs", "sync_enabled", "enable_sync", "sync_jobs_enabled"):
@@ -63,14 +50,11 @@ def run():
 
     client = YeastarClient(settings)
 
-    # 1) Extensions (optional)
     if _get_flag(settings, "sync_extensions", "enable_sync_extensions"):
         sync_extensions(client)
 
-    # 2) Call Logs (important)
     sync_call_logs(client)
 
-    # update last sync ts after success
     settings.db_set("last_sync_at_ts", _now_ts(), update_modified=False)
 
 
@@ -116,14 +100,7 @@ def sync_call_logs(client: YeastarClient):
         page += 1
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Different Yeastar builds return different shapes.
-    We'll try common keys.
-    """
     if not isinstance(payload, dict):
         return []
 
@@ -139,9 +116,6 @@ def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> bool:
-    """
-    Try to detect pagination.
-    """
     if not isinstance(payload, dict):
         return False
 
@@ -156,9 +130,6 @@ def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> b
     return got >= page_size
 
 
-# ----------------------------
-# Upserts
-# ----------------------------
 def upsert_agent_from_extension(ext: Dict[str, Any]):
     extension = str(ext.get("extension") or ext.get("ext") or ext.get("number") or "").strip()
     name = str(ext.get("name") or ext.get("username") or ext.get("display_name") or "").strip()
@@ -182,22 +153,15 @@ def upsert_agent_from_extension(ext: Dict[str, Any]):
 
 
 def upsert_call_log(row: Dict[str, Any], settings):
-    call_id = str(
-        row.get("call_id")
-        or row.get("uniqueid")
-        or row.get("id")
-        or row.get("cdr_id")
-        or row.get("cdrId")
-        or ""
-    ).strip()
+    call_id = str(row.get("call_id") or row.get("uniqueid") or row.get("id") or row.get("cdr_id") or row.get("cdrId") or "").strip()
     if not call_id:
         call_id = f"{row.get('start_time')}-{row.get('src')}-{row.get('dst')}"
 
     direction = str(row.get("direction") or row.get("call_direction") or row.get("type") or "").strip().lower()
     status = str(row.get("status") or row.get("state") or row.get("event") or row.get("call_state") or "").strip().lower()
 
-    src = str(row.get("src") or row.get("caller") or row.get("caller_number") or row.get("callerNumber") or row.get("from") or "").strip()
-    dst = str(row.get("dst") or row.get("callee") or row.get("callee_number") or row.get("calleeNumber") or row.get("to") or "").strip()
+    src = str(row.get("src") or row.get("caller") or row.get("caller_number") or row.get("from") or "").strip()
+    dst = str(row.get("dst") or row.get("callee") or row.get("callee_number") or row.get("to") or "").strip()
 
     default_cc = str(getattr(settings, "phone_country_code", "+966") or "+966")
     src_n = normalize_phone(src, default_cc=default_cc)
@@ -242,33 +206,12 @@ def upsert_call_log(row: Dict[str, Any], settings):
             if k in ("raw_payload", "last_event_at", "status"):
                 doc.set(k, v)
                 continue
-
             if v in (None, "", 0):
                 continue
-
             if not doc.get(k) or doc.get(k) in ("", 0):
                 doc.set(k, v)
-
         doc.save(ignore_permissions=True)
         return
 
     doc = frappe.get_doc({"doctype": "Yeastar Call Log", **doc_data})
     doc.insert(ignore_permissions=True)
-
-    if _get_flag(settings, "auto_link_crm"):
-        try_link_crm(doc, settings)
-
-
-def try_link_crm(call_log_doc, settings):
-    number = call_log_doc.from_number or call_log_doc.to_number
-    if not number:
-        return
-
-    lead = frappe.db.get_value("Lead", {"phone": ["like", f"%{number[-8:]}%"]}, "name")
-    if lead and hasattr(call_log_doc, "lead"):
-        call_log_doc.db_set("lead", lead, update_modified=False)
-        return
-
-    customer = frappe.db.get_value("Customer", {"mobile_no": ["like", f"%{number[-8:]}%"]}, "name")
-    if customer and hasattr(call_log_doc, "customer"):
-        call_log_doc.db_set("customer", customer, update_modified=False)
