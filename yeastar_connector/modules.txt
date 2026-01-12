@@ -1,1 +1,1 @@
-yeastar_connector
+Yeastar Connector
