@@ -15,10 +15,6 @@ def _now_ts() -> int:
 
 
 def _get_flag(settings, *names: str) -> int:
-    """
-    Return 1 if any of the provided attribute names is truthy on settings.
-    Helps when fieldname differs across versions.
-    """
     for n in names:
         v = getattr(settings, n, None)
         if v is None:
@@ -33,45 +29,36 @@ def _get_flag(settings, *names: str) -> int:
 
 
 def _get_time_window(settings) -> Tuple[int, int]:
-    """
-    start_ts based on last_sync_at_ts or sync_from_ts
-    with overlap to catch delayed recordings.
-    """
     start_ts = int(getattr(settings, "last_sync_at_ts", None) or 0)
 
     if not start_ts:
         start_ts = int(getattr(settings, "sync_from_ts", None) or 0)
 
     if not start_ts:
-        start_ts = _now_ts() - 24 * 3600  # default: last 24 hours
+        start_ts = _now_ts() - 24 * 3600
 
-    # overlap 10 minutes (recordings may arrive late)
     start_ts = max(0, start_ts - 600)
-
     end_ts = _now_ts()
     return start_ts, end_ts
 
 
 def run():
-    """
-    Scheduled entrypoint (called by hooks cron)
-    """
     settings = frappe.get_single("Yeastar Settings")
 
-    # Support different fieldnames for the checkbox
+    # لازم الإضافة Enabled + Sync Enabled
+    if not _get_flag(settings, "enabled"):
+        return
+
     if not _get_flag(settings, "enable_sync_jobs", "sync_enabled", "enable_sync", "sync_jobs_enabled"):
         return
 
     client = YeastarClient(settings)
 
-    # 1) Extensions (optional)
     if _get_flag(settings, "sync_extensions", "enable_sync_extensions"):
         sync_extensions(client)
 
-    # 2) Call Logs (important)
     sync_call_logs(client)
 
-    # update last sync ts after success
     settings.db_set("last_sync_at_ts", _now_ts(), update_modified=False)
 
 
@@ -117,14 +104,7 @@ def sync_call_logs(client: YeastarClient):
         page += 1
 
 
-# ----------------------------
-# Helpers to handle variations in Yeastar API response
-# ----------------------------
 def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Different Yeastar builds return different shapes.
-    We'll try common keys.
-    """
     if not isinstance(payload, dict):
         return []
 
@@ -133,7 +113,6 @@ def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(v, list):
             return v
         if isinstance(v, dict):
-            # some APIs nest list under dict
             for k2 in ("items", "list", "records", "data"):
                 if isinstance(v.get(k2), list):
                     return v.get(k2)
@@ -141,9 +120,6 @@ def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> bool:
-    """
-    Try to detect pagination.
-    """
     if not isinstance(payload, dict):
         return False
 
@@ -155,18 +131,10 @@ def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> b
     if total is not None:
         return page * page_size < int(total)
 
-    # fallback: if we got a full page, maybe there are more
     return got >= page_size
 
 
-# ----------------------------
-# Upserts
-# ----------------------------
 def upsert_agent_from_extension(ext: Dict[str, Any]):
-    """
-    Map Yeastar extension to Yeastar Agent DocType.
-    You may need to adjust keys based on Yeastar response.
-    """
     extension = str(ext.get("extension") or ext.get("ext") or ext.get("number") or "").strip()
     name = str(ext.get("name") or ext.get("username") or ext.get("display_name") or "").strip()
 
@@ -189,13 +157,6 @@ def upsert_agent_from_extension(ext: Dict[str, Any]):
 
 
 def upsert_call_log(row: Dict[str, Any], settings):
-    """
-    Upsert Yeastar Call Log.
-    IMPORTANT: update existing doc (do NOT skip) so recordings/duration get filled.
-    Aligned with fields used in api.py: from_number/to_number/extension/duration/recording_url/status/direction/...
-    """
-
-    # stable call id
     call_id = str(row.get("call_id") or row.get("uniqueid") or row.get("id") or row.get("cdr_id") or row.get("cdrId") or "").strip()
     if not call_id:
         call_id = f"{row.get('start_time')}-{row.get('src')}-{row.get('dst')}"
@@ -212,7 +173,6 @@ def upsert_call_log(row: Dict[str, Any], settings):
 
     extension = str(row.get("extension") or row.get("ext") or row.get("agent_ext") or row.get("agent_extension") or "").strip()
 
-    # timestamps (may be TS or strings; store as-is if your DocType supports it)
     start_time = row.get("start_time") or row.get("startTime") or row.get("start_ts") or row.get("startTs")
     end_time = row.get("end_time") or row.get("endTime") or row.get("end_ts") or row.get("endTs")
 
@@ -247,7 +207,6 @@ def upsert_call_log(row: Dict[str, Any], settings):
     if existing_name:
         doc = frappe.get_doc("Yeastar Call Log", existing_name)
 
-        # Update only missing values, but always refresh status/raw_payload/last_event_at
         for k, v in doc_data.items():
             if k in ("raw_payload", "last_event_at", "status"):
                 doc.set(k, v)
@@ -265,23 +224,15 @@ def upsert_call_log(row: Dict[str, Any], settings):
     doc = frappe.get_doc({"doctype": "Yeastar Call Log", **doc_data})
     doc.insert(ignore_permissions=True)
 
-    # Optional: Auto link to Lead/Customer by phone (if you add this flag/fields)
     if _get_flag(settings, "auto_link_crm"):
         try_link_crm(doc, settings)
 
 
 def try_link_crm(call_log_doc, settings):
-    """
-    Example linking strategy:
-    - Find Lead by phone
-    - Find Customer by phone
-    Adjust per your CRM fields.
-    """
     number = call_log_doc.from_number or call_log_doc.to_number
     if not number:
         return
 
-    # Lead match (example fields)
     lead = frappe.db.get_value("Lead", {"phone": ["like", f"%{number[-8:]}%"]}, "name")
     if lead and hasattr(call_log_doc, "lead"):
         call_log_doc.db_set("lead", lead, update_modified=False)
