@@ -15,6 +15,10 @@ def _now_ts() -> int:
 
 
 def _get_flag(settings, *names: str) -> int:
+    """
+    Return 1 if any of the provided attribute names is truthy on settings.
+    Helps when fieldname differs across versions.
+    """
     for n in names:
         v = getattr(settings, n, None)
         if v is None:
@@ -29,36 +33,44 @@ def _get_flag(settings, *names: str) -> int:
 
 
 def _get_time_window(settings) -> Tuple[int, int]:
+    """
+    start_ts based on last_sync_at_ts or sync_from_ts
+    with overlap to catch delayed records.
+    """
     start_ts = int(getattr(settings, "last_sync_at_ts", None) or 0)
 
     if not start_ts:
         start_ts = int(getattr(settings, "sync_from_ts", None) or 0)
 
     if not start_ts:
-        start_ts = _now_ts() - 24 * 3600
+        start_ts = _now_ts() - 24 * 3600  # default: last 24 hours
 
+    # overlap 10 minutes
     start_ts = max(0, start_ts - 600)
+
     end_ts = _now_ts()
     return start_ts, end_ts
 
 
 def run():
+    """
+    Scheduled entrypoint (called by hooks cron)
+    """
     settings = frappe.get_single("Yeastar Settings")
-
-    # لازم الإضافة Enabled + Sync Enabled
-    if not _get_flag(settings, "enabled"):
-        return
 
     if not _get_flag(settings, "enable_sync_jobs", "sync_enabled", "enable_sync", "sync_jobs_enabled"):
         return
 
     client = YeastarClient(settings)
 
+    # 1) Extensions (optional)
     if _get_flag(settings, "sync_extensions", "enable_sync_extensions"):
         sync_extensions(client)
 
+    # 2) Call Logs (important)
     sync_call_logs(client)
 
+    # update last sync ts after success
     settings.db_set("last_sync_at_ts", _now_ts(), update_modified=False)
 
 
@@ -104,7 +116,14 @@ def sync_call_logs(client: YeastarClient):
         page += 1
 
 
+# ----------------------------
+# Helpers
+# ----------------------------
 def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Different Yeastar builds return different shapes.
+    We'll try common keys.
+    """
     if not isinstance(payload, dict):
         return []
 
@@ -120,6 +139,9 @@ def _extract_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> bool:
+    """
+    Try to detect pagination.
+    """
     if not isinstance(payload, dict):
         return False
 
@@ -134,6 +156,9 @@ def _has_more(payload: Dict[str, Any], page: int, page_size: int, got: int) -> b
     return got >= page_size
 
 
+# ----------------------------
+# Upserts
+# ----------------------------
 def upsert_agent_from_extension(ext: Dict[str, Any]):
     extension = str(ext.get("extension") or ext.get("ext") or ext.get("number") or "").strip()
     name = str(ext.get("name") or ext.get("username") or ext.get("display_name") or "").strip()
@@ -157,7 +182,14 @@ def upsert_agent_from_extension(ext: Dict[str, Any]):
 
 
 def upsert_call_log(row: Dict[str, Any], settings):
-    call_id = str(row.get("call_id") or row.get("uniqueid") or row.get("id") or row.get("cdr_id") or row.get("cdrId") or "").strip()
+    call_id = str(
+        row.get("call_id")
+        or row.get("uniqueid")
+        or row.get("id")
+        or row.get("cdr_id")
+        or row.get("cdrId")
+        or ""
+    ).strip()
     if not call_id:
         call_id = f"{row.get('start_time')}-{row.get('src')}-{row.get('dst')}"
 
@@ -206,7 +238,6 @@ def upsert_call_log(row: Dict[str, Any], settings):
 
     if existing_name:
         doc = frappe.get_doc("Yeastar Call Log", existing_name)
-
         for k, v in doc_data.items():
             if k in ("raw_payload", "last_event_at", "status"):
                 doc.set(k, v)
