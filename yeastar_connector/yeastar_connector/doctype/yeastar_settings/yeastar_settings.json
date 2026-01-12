@@ -1,7 +1,7 @@
 {
   "doctype": "DocType",
   "name": "Yeastar Settings",
-  "module": "Yeastar Connector",
+  "module": "yeastar_connector",
   "custom": 0,
   "istable": 0,
   "issingle": 1,
