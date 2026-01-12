@@ -21,19 +21,16 @@ def get_settings():
 
 class YeastarClient:
     """
-    Token client for Yeastar OpenAPI.
+    Yeastar P-Series Cloud Edition OpenAPI client.
 
-    Expected on your PBX:
+    Auth:
       POST <base_url><api_base_path>/get_token
-    Then all APIs should include:
-      ?token=<token>
+      Headers MUST include: User-Agent: OpenAPI
+      Body: {"username": "<Client ID>", "password": "<Client Secret>"}
 
-    Required settings:
-      - pbx_base_url        e.g. https://abragtaj.ras.yeastar.com
-      - api_base_path       e.g. /openapi/v1.0
-      - token_url (optional) e.g. https://abragtaj.ras.yeastar.com/openapi/v1.0/get_token
-      - api_username
-      - api_password (Password field)
+    API calls:
+      Use query param: access_token=<token>
+      (Not Authorization header, not token=)
     """
 
     def __init__(self, settings=None):
@@ -52,13 +49,6 @@ class YeastarClient:
             self.token_url = f"{self.base_url}{self.api_base_path}/get_token"
 
         self.timeout = int(getattr(self.settings, "request_timeout", 0) or 20)
-
-        # Optional (keep if you want)
-        self.client_id = (getattr(self.settings, "client_id", "") or "").strip()
-        try:
-            self.client_secret = (self.settings.get_password("client_secret") or "").strip()
-        except Exception:
-            self.client_secret = (getattr(self.settings, "client_secret", "") or "").strip()
 
     # ---------------------------
     # Token
@@ -87,57 +77,34 @@ class YeastarClient:
             api_password = (getattr(self.settings, "api_password", "") or "").strip()
 
         if not api_username or not api_password:
-            raise YeastarAPIError("Yeastar Settings missing api_username / api_password")
+            raise YeastarAPIError("Yeastar Settings missing api_username / api_password (Client ID/Secret)")
 
-        payload_json: Dict[str, Any] = {
-            "username": api_username,
-            "password": api_password,
+        payload: Dict[str, Any] = {"username": api_username, "password": api_password}
+
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "OpenAPI",  # REQUIRED by Yeastar docs
         }
 
-        # Keep optional (won't hurt if ignored)
-        if self.client_id:
-            payload_json["client_id"] = self.client_id
-        if self.client_secret:
-            payload_json["client_secret"] = self.client_secret
-
-        headers_json = {"Accept": "application/json", "Content-Type": "application/json"}
-
         try:
-            resp = requests.post(self.token_url, json=payload_json, headers=headers_json, timeout=self.timeout)
+            resp = requests.post(self.token_url, json=payload, headers=headers, timeout=self.timeout)
         except Exception:
             frappe.log_error(title="Yeastar token request failed", message=frappe.get_traceback())
             raise YeastarAPIError("Token request failed (connection error)")
 
-        # If server rejects JSON, retry as form
-        if resp.status_code >= 300:
-            headers_form = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
-            try:
-                resp = requests.post(self.token_url, data=payload_json, headers=headers_form, timeout=self.timeout)
-            except Exception:
-                frappe.log_error(title="Yeastar token request failed (form retry)", message=frappe.get_traceback())
-                raise YeastarAPIError(f"Token request failed: HTTP {resp.status_code}")
-
-        # Parse JSON (some servers return JSON with odd content-type)
         try:
             data = resp.json() if resp.text else {}
         except Exception:
             data = {}
 
-        # Yeastar-style error payloads
         if isinstance(data, dict) and data.get("errcode") and int(data.get("errcode") or 0) != 0:
             frappe.log_error(title="Yeastar token invalid payload", message=str(data)[:2000])
-            raise YeastarAPIError(f"Token error: {data.get('errmsg') or data.get('message') or data.get('errcode')}")
+            raise YeastarAPIError(f"Token error: {data.get('errmsg') or data.get('errcode')}")
 
-        # token might be top-level or nested
-        access_token = ""
-        expires_in = 3600
-
-        if isinstance(data.get("data"), dict):
-            access_token = (data["data"].get("access_token") or data["data"].get("token") or "").strip()
-            expires_in = int(data["data"].get("expires_in") or data["data"].get("expires") or 3600)
-        else:
-            access_token = (data.get("access_token") or data.get("token") or "").strip()
-            expires_in = int(data.get("expires_in") or data.get("expires") or 3600)
+        access_token = (data.get("access_token") or "").strip()
+        refresh_token = (data.get("refresh_token") or "").strip()
+        expires_in = int(data.get("access_token_expire_time") or 1800)
 
         if not access_token:
             frappe.log_error(
@@ -146,10 +113,10 @@ class YeastarClient:
             )
             raise YeastarAPIError("Token returned no access_token")
 
-        exp_ts = _now_ts() + int(expires_in or 3600)
+        exp_ts = _now_ts() + expires_in
 
-        # store token in Data field (not Password)
         self.settings.db_set("access_token", access_token, update_modified=False)
+        self.settings.db_set("refresh_token", refresh_token, update_modified=False)
         self.settings.db_set("token_expires_at_ts", exp_ts, update_modified=False)
 
         return access_token
@@ -165,50 +132,38 @@ class YeastarClient:
             path = "/" + path
         return f"{self.base_url}{self.api_base_path}{path}"
 
-    def _with_token(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _with_access_token(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         p = dict(params or {})
-        p["token"] = self.ensure_token()
+        p["access_token"] = self.ensure_token()
         return p
 
     def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = self._build_url(path)
         try:
-            resp = requests.get(url, params=self._with_token(params), timeout=self.timeout, headers={"Accept": "application/json"})
+            resp = requests.get(
+                url,
+                params=self._with_access_token(params),
+                timeout=self.timeout,
+                headers={"Accept": "application/json", "User-Agent": "OpenAPI"},
+            )
         except Exception:
             frappe.log_error(title="Yeastar GET failed", message=frappe.get_traceback())
             raise YeastarAPIError("GET failed (connection error)")
 
+        try:
+            data = resp.json() if resp.text else {}
+        except Exception:
+            data = {}
+
+        if isinstance(data, dict) and data.get("errcode") and int(data.get("errcode") or 0) != 0:
+            frappe.log_error(title="Yeastar GET error payload", message=str(data)[:2000])
+            raise YeastarAPIError(f"GET error: {data.get('errmsg') or data.get('errcode')}")
+
         if resp.status_code >= 300:
-            frappe.log_error(title="Yeastar GET error", message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}")
+            frappe.log_error(title="Yeastar GET HTTP error", message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}")
             raise YeastarAPIError(f"GET failed: HTTP {resp.status_code}")
 
-        try:
-            return resp.json() if resp.text else {}
-        except Exception:
-            return {}
-
-    def post(self, path: str, json: Optional[Dict[str, Any]] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        url = self._build_url(path)
-        try:
-            resp = requests.post(
-                url,
-                params=self._with_token(params),
-                json=json or {},
-                timeout=self.timeout,
-                headers={"Accept": "application/json"},
-            )
-        except Exception:
-            frappe.log_error(title="Yeastar POST failed", message=frappe.get_traceback())
-            raise YeastarAPIError("POST failed (connection error)")
-
-        if resp.status_code >= 300:
-            frappe.log_error(title="Yeastar POST error", message=f"HTTP {resp.status_code}\nURL: {url}\n{resp.text[:2000]}")
-            raise YeastarAPIError(f"POST failed: HTTP {resp.status_code}")
-
-        try:
-            return resp.json() if resp.text else {}
-        except Exception:
-            return {}
+        return data if isinstance(data, dict) else {}
 
     # ---------------------------
     # API wrappers
@@ -222,7 +177,3 @@ class YeastarClient:
         endpoint = getattr(self.settings, "call_logs_endpoint", None) or "/cdr/list"
         params = {"start_time": start_ts, "end_time": end_ts, "page": page, "page_size": page_size}
         return self.get(endpoint, params=params)
-
-    def fetch_recording_download_url(self, recording_id: str) -> Dict[str, Any]:
-        endpoint_tpl = getattr(self.settings, "recording_endpoint_tpl", None) or "/recording/get"
-        return self.get(endpoint_tpl, params={"id": recording_id})
