@@ -15,7 +15,6 @@
       "label": "Enabled",
       "default": "0"
     },
-
     {
       "fieldname": "section_webhook",
       "fieldtype": "Section Break",
@@ -46,17 +45,16 @@
       "label": "Ignore Internal Calls",
       "default": "1"
     },
-
     {
       "fieldname": "section_api",
       "fieldtype": "Section Break",
-      "label": "Yeastar API (OAuth)"
+      "label": "Yeastar API (OpenAPI)"
     },
     {
       "fieldname": "pbx_base_url",
       "fieldtype": "Data",
       "label": "PBX Base URL",
-      "description": "Example: https://abrajataj.ras.yeastar.com",
+      "description": "Example: https://abragtaj.ras.yeastar.com",
       "depends_on": "eval:doc.enabled==1"
     },
     {
@@ -70,7 +68,19 @@
       "fieldname": "token_url",
       "fieldtype": "Data",
       "label": "Token URL (optional)",
-      "description": "Leave empty to use: <PBX Base URL><API Base Path>/oauth2/token",
+      "description": "Leave empty to use: <PBX Base URL><API Base Path>/get_token",
+      "depends_on": "eval:doc.enabled==1"
+    },
+    {
+      "fieldname": "api_username",
+      "fieldtype": "Data",
+      "label": "API Username",
+      "depends_on": "eval:doc.enabled==1"
+    },
+    {
+      "fieldname": "api_password",
+      "fieldtype": "Password",
+      "label": "API Password",
       "depends_on": "eval:doc.enabled==1"
     },
     {
@@ -85,21 +95,14 @@
       "label": "Client Secret",
       "depends_on": "eval:doc.enabled==1"
     },
-
     {
       "fieldname": "column_api_token",
       "fieldtype": "Column Break"
     },
     {
       "fieldname": "access_token",
-      "fieldtype": "Password",
+      "fieldtype": "Data",
       "label": "Access Token (auto)",
-      "read_only": 1
-    },
-    {
-      "fieldname": "refresh_token",
-      "fieldtype": "Password",
-      "label": "Refresh Token (auto)",
       "read_only": 1
     },
     {
@@ -114,7 +117,6 @@
       "label": "Request Timeout (seconds)",
       "default": "20"
     },
-
     {
       "fieldname": "section_sync",
       "fieldtype": "Section Break",
@@ -161,7 +163,6 @@
       "description": "If empty, defaults to last 24h",
       "depends_on": "eval:doc.sync_enabled==1"
     },
-
     {
       "fieldname": "section_endpoints",
       "fieldtype": "Section Break",
