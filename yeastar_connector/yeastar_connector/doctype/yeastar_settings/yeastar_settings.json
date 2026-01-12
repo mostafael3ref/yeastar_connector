@@ -15,6 +15,7 @@
       "label": "Enabled",
       "default": "0"
     },
+
     {
       "fieldname": "section_webhook",
       "fieldtype": "Section Break",
@@ -45,6 +46,7 @@
       "label": "Ignore Internal Calls",
       "default": "1"
     },
+
     {
       "fieldname": "section_api",
       "fieldtype": "Section Break",
@@ -62,25 +64,7 @@
       "fieldtype": "Data",
       "label": "API Base Path",
       "default": "/openapi/v1.0",
-      "depends_on": "eval:doc.enabled==1"
-    },
-    {
-      "fieldname": "token_url",
-      "fieldtype": "Data",
-      "label": "Token URL (optional)",
-      "description": "Leave empty to use: <PBX Base URL><API Base Path>/get_token",
-      "depends_on": "eval:doc.enabled==1"
-    },
-    {
-      "fieldname": "api_username",
-      "fieldtype": "Data",
-      "label": "API Username",
-      "depends_on": "eval:doc.enabled==1"
-    },
-    {
-      "fieldname": "api_password",
-      "fieldtype": "Password",
-      "label": "API Password",
+      "description": "Example: /openapi/v1.0",
       "depends_on": "eval:doc.enabled==1"
     },
     {
@@ -95,21 +79,10 @@
       "label": "Client Secret",
       "depends_on": "eval:doc.enabled==1"
     },
+
     {
-      "fieldname": "column_api_token",
+      "fieldname": "column_api_misc",
       "fieldtype": "Column Break"
-    },
-    {
-      "fieldname": "access_token",
-      "fieldtype": "Data",
-      "label": "Access Token (auto)",
-      "read_only": 1
-    },
-    {
-      "fieldname": "token_expires_at_ts",
-      "fieldtype": "Int",
-      "label": "Token Expires At (TS)",
-      "read_only": 1
     },
     {
       "fieldname": "request_timeout",
@@ -117,6 +90,7 @@
       "label": "Request Timeout (seconds)",
       "default": "20"
     },
+
     {
       "fieldname": "section_sync",
       "fieldtype": "Section Break",
@@ -163,6 +137,7 @@
       "description": "If empty, defaults to last 24h",
       "depends_on": "eval:doc.sync_enabled==1"
     },
+
     {
       "fieldname": "section_endpoints",
       "fieldtype": "Section Break",
@@ -186,7 +161,7 @@
       "fieldname": "recording_endpoint_tpl",
       "fieldtype": "Data",
       "label": "Recording Endpoint",
-      "default": "/recording/get",
+      "default": "/recording/get_random",
       "depends_on": "eval:doc.sync_enabled==1"
     }
   ],
