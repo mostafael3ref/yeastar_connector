@@ -1,5 +1,5 @@
 app_name = "yeastar_connector"
-app_title = "Yeastar Connector"
+app_title = "yeastar_connector"
 app_publisher = "Mostafa EL-Areef"
 app_description = "Private Yeastar P-Series (P570) integration for ERPNext/Frappe"
 app_icon = "octicon octicon-device-mobile"
